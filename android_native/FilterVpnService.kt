@@ -160,12 +160,15 @@ class FilterVpnService : VpnService() {
             PendingIntent.FLAG_IMMUTABLE
         )
         val notification: Notification =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // Android 8+ 必须使用带渠道 ID 的构造器，否则 startForeground 抛
+                // RemoteServiceException: Bad notification（Android 12 起强制校验）
                 Notification.Builder(this, CHANNEL_ID)
                     .setContentTitle("AdShield 正在拦截广告")
                     .setContentText("DNS 过滤运行中")
                     .setSmallIcon(android.R.drawable.stat_notify_more)
                     .setContentIntent(intent)
+                    .setOngoing(true)
                     .build()
             } else {
                 Notification.Builder(this)
