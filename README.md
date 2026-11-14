@@ -2,6 +2,25 @@
 
 本地 VPN + DNS 过滤方案的广告拦截器，**Flutter 跨平台（Android + iOS）**，并针对**折叠屏手机**做了完整自适应。
 
+> **v1.1.0 升级亮点**
+> - **规则库升级**：接入 GitHub 开源 [217heidai/adblockfilters](https://github.com/217heidai/adblockfilters)（256,670 条域名、聚合 AdGuard 中文过滤/EasyList China/AWAvenue 等 15 个源、每 8 小时更新），主源失败自动切换 gh-proxy 国内镜像；
+> - **IPv6 DNS 拦截**：新增 IPv6 双栈劫持（Google/Cloudflare/阿里/DNSPod 等硬编码 IPv6 DNS 一并拦截），堵住旧版绕过漏洞；
+> - **iOS 云构建**：通过 GitHub Actions macOS runner 产出未签名 IPA（`.github/workflows/ios.yml`）。
+
+## 仓库与安装包
+
+- GitHub 仓库：https://github.com/ihdx4970/adshield
+- Android：`AdShield-v1.1.0.apk`（Release 构建，可直接安装）
+- iOS：`AdShield-ios-unsigned.ipa`（GitHub Actions 产出，**未签名**，需侧载）
+
+### iOS 安装说明（重要）
+
+iOS 无法像 APK 一样直接安装，未签名 IPA 的安装途径：
+1. **AltStore / Sideloadly**：连接电脑用个人 Apple ID 重签（免费证书 7 天有效期，可续签）；
+2. **TrollStore**（旧系统适用）：永久签名免越狱安装；
+3. 有付费开发者账号（$99/年）可用 Xcode 签名分发。
+需要完整签名分发时，把仓库中 `ios_native/DnsFilterPacketTunnelProvider.swift` 按 Xcode 步骤加入 Runner Target 并配置签名即可。
+
 ## 项目结构
 
 ```
