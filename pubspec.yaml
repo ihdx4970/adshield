@@ -1,0 +1,29 @@
+name: adshield
+description: "AdShield - 本地 VPN + DNS 过滤广告拦截应用，支持安卓/iOS 与折叠屏自适应布局。"
+publish_to: "none"
+version: 1.1.0+2
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 状态管理
+  provider: ^6.1.2
+  # 本地持久化（规则 / 白名单 / 设置 / 统计）
+  shared_preferences: ^2.3.2
+  # 与安卓原生共享规则文件的目录
+  path_provider: ^2.1.4
+  # 广告规则订阅在线更新
+  http: ^1.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/blocklist.txt

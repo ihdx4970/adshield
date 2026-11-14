@@ -1,0 +1,75 @@
+# AdShield iOS 云构建：在 GitHub macOS runner 上产出未签名 IPA
+# 说明：iOS 无法像安卓那样随处安装，未签名 IPA 需通过 AltStore / Sideloadly /
+#       TrollStore 等工具侧载，或导入企业证书/个人开发者证书重签后安装。
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
+      - name: Show environment
+        run: |
+          flutter --version
+          xcodebuild -version
+
+      # 在云端生成 iOS 平台工程（本地仓库不含 ios/ 目录，保持源码精简）
+      - name: Generate iOS platform project
+        run: flutter create --project-name adshield --org com.adshield --platforms ios .
+
+      # 用带 DNS 过滤的自定义 AppDelegate 覆盖模板文件
+      - name: Apply custom AppDelegate (DNS filtering)
+        run: cp ios_native/AppDelegate.swift ios/Runner/AppDelegate.swift
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
+          zip -qry AdShield-ios-unsigned.ipa Payload
+          rm -rf Payload
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: adshield-ios-unsigned-ipa
+          path: AdShield-ios-unsigned.ipa
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-v1.1.0
+          name: AdShield iOS v1.1.0 (unsigned IPA)
+          body: |
+            未签名 IPA，通过 AltStore / Sideloadly 侧载安装。
+            包名 com.adshield.app，DNS 过滤版 AppDelegate。
+          files: AdShield-ios-unsigned.ipa
