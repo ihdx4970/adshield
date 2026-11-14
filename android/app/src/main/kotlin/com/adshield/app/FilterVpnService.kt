@@ -79,6 +79,10 @@ class FilterVpnService : VpnService() {
     private var worker: Thread? = null
     private val dnsPool = Executors.newCachedThreadPool()
 
+    /// DNS 响应缓存：key = "域名/记录类型"，TTL 内命中直接回包，避免重复走上游转发链路
+    private class CacheEntry(val reply: ByteArray, val expiresAt: Long)
+    private val dnsCache = java.util.concurrent.ConcurrentHashMap<String, CacheEntry>()
+
     private var blockSet: MutableSet<String> = HashSet()
     private var allowSet: MutableSet<String> = HashSet()
     private var upstreamDns = "223.5.5.5"
@@ -277,12 +281,20 @@ class FilterVpnService : VpnService() {
             writePacket(output, buildReply(exchange, blockedResponse(query)))
         } else {
             allowedCount.incrementAndGet()
-            dnsPool.execute {
-                val reply = forwardToUpstream(exchange.dnsMsg)
-                if (reply != null) {
-                    try {
-                        writePacket(output, buildReply(exchange, reply))
-                    } catch (_: Exception) { }
+            // 缓存命中：跳过 socket 转发，直接回包（写回时需改写事务 ID 为本次查询的 ID）
+            val cacheKey = query.name + "/" + query.qtype
+            val hit = dnsCache[cacheKey]?.takeIf { System.currentTimeMillis() < it.expiresAt }
+            if (hit != null) {
+                writePacket(output, buildReply(exchange, withQueryId(hit.reply, query.id)))
+            } else {
+                dnsPool.execute {
+                    val reply = forwardToUpstream(exchange.dnsMsg)
+                    if (reply != null) {
+                        storeInCache(cacheKey, reply)
+                        try {
+                            writePacket(output, buildReply(exchange, reply))
+                        } catch (_: Exception) { }
+                    }
                 }
             }
         }
@@ -397,7 +409,7 @@ class FilterVpnService : VpnService() {
     // DNS 解析与应答
     // ------------------------------------------------------------------
 
-    private class DnsQuery(val id: Int, val name: String, val rawQuestion: ByteArray)
+    private class DnsQuery(val id: Int, val name: String, val qtype: Int, val rawQuestion: ByteArray)
 
     private fun parseDnsQuery(msg: ByteArray): DnsQuery? {
         if (msg.size < 12) return null
@@ -415,7 +427,10 @@ class FilterVpnService : VpnService() {
             i += 1 + len
         }
         if (i + 4 > msg.size) return null
-        return DnsQuery(id, labels.joinToString(".").lowercase(), msg.copyOfRange(0, i + 4))
+        // question 末尾 4 字节 = QTYPE(2) + QCLASS(2)
+        val qtype = ((msg[i].toInt() and 0xFF) shl 8) or (msg[i + 1].toInt() and 0xFF)
+        return DnsQuery(id, labels.joinToString(".").lowercase(), qtype,
+            msg.copyOfRange(0, i + 4))
     }
 
     /// NXDOMAIN 应答：复用原查询的 header + question
@@ -426,6 +441,65 @@ class FilterVpnService : VpnService() {
         out[8] = 0; out[9] = 0  // NSCOUNT = 0
         out[10] = 0; out[11] = 0 // ARCOUNT = 0
         return out
+    }
+
+    /// 把应答报文的事务 ID 改写为本次查询的 ID（缓存命中时与当初查询的 ID 不同）
+    private fun withQueryId(reply: ByteArray, id: Int): ByteArray {
+        val out = reply.copyOf()
+        out[0] = ((id shr 8) and 0xFF).toByte()
+        out[1] = (id and 0xFF).toByte()
+        return out
+    }
+
+    /// 解析上游应答各资源记录的最小 TTL（秒），作为缓存有效期；无应答记录或解析失败返回 null
+    private fun parseMinTtl(msg: ByteArray): Long? {
+        if (msg.size < 12) return null
+        var count = ((msg[6].toInt() and 0xFF) shl 8) or (msg[7].toInt() and 0xFF)
+        if (count == 0) return null
+        var i = 12
+        // 跳过 question 区（问题段一般无压缩指针，稳妥起见也处理）
+        while (i < msg.size) {
+            val len = msg[i].toInt() and 0xFF
+            if (len == 0) { i += 1; break }
+            if ((len and 0xC0) == 0xC0) { i += 2; break }
+            i += 1 + len
+        }
+        i += 4 // QTYPE + QCLASS
+        var minTtl: Long? = null
+        while (count > 0 && i < msg.size) {
+            // 跳过资源记录名（可能含压缩指针 0xC0 前缀）
+            var j = i
+            var jumps = 0
+            while (j < msg.size) {
+                val len = msg[j].toInt() and 0xFF
+                if (len == 0) { j += 1; break }
+                if ((len and 0xC0) == 0xC0) { j += 2; break }
+                j += 1 + len
+                if (++jumps > 64) return null
+            }
+            if (j + 10 > msg.size) return null
+            val ttl = (((msg[j + 4].toInt() and 0xFF) shl 24) or
+                    ((msg[j + 5].toInt() and 0xFF) shl 16) or
+                    ((msg[j + 6].toInt() and 0xFF) shl 8) or
+                    (msg[j + 7].toInt() and 0xFF)).toLong() and 0xFFFFFFFFL
+            if (minTtl == null || ttl < minTtl) minTtl = ttl
+            val rdlen = ((msg[j + 8].toInt() and 0xFF) shl 8) or (msg[j + 9].toInt() and 0xFF)
+            i = j + 10 + rdlen
+            count--
+        }
+        return minTtl
+    }
+
+    /// 写入缓存：TTL 收敛在 30 秒 ~ 10 分钟（过短无意义，过长避免 CDN 切换后拿到旧节点）
+    private fun storeInCache(key: String, reply: ByteArray) {
+        val ttl = parseMinTtl(reply) ?: return // 无应答记录（如 NXDOMAIN）不缓存
+        if (dnsCache.size >= 1024) {
+            val now = System.currentTimeMillis()
+            dnsCache.values.removeIf { it.expiresAt <= now }
+            if (dnsCache.size >= 1024) dnsCache.clear()
+        }
+        val expiresAt = System.currentTimeMillis() + ttl.coerceIn(30, 600) * 1000
+        dnsCache[key] = CacheEntry(reply, expiresAt)
     }
 
     // ------------------------------------------------------------------
