@@ -79,7 +79,6 @@ class MainActivity : FlutterActivity() {
                 }
             } catch (e: Exception) {
                 AdShieldApplication.appendLog(this, "[MethodChannel ${call.method}]\n${e.stackTraceToString()}")
-                if (e.message?.contains("already") == true) return
                 result.error("NATIVE_ERROR", e.message, null)
             }
         }
@@ -91,7 +90,7 @@ class MainActivity : FlutterActivity() {
                 private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
                 /// 保证 sink 只在主线程调用，且吞掉发送异常（对端销毁时 Flutter 层会抛错）
-                private fun safeSend(data: Any?) {
+                private fun safeSend(sink: EventChannel.EventSink?, data: Any?) {
                     mainHandler.post {
                         try {
                             sink?.success(data)
@@ -104,7 +103,7 @@ class MainActivity : FlutterActivity() {
                 override fun onListen(args: Any?, sink: EventChannel.EventSink?) {
                     foldSink = sink
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                        safeSend(mapOf("posture" to "unknown", "hingeOrientation" to "none"))
+                        safeSend(sink, mapOf("posture" to "unknown", "hingeOrientation" to "none"))
                         return
                     }
                     // 每次监听用独立 Job，取消后仍可重新监听（修复旧版 scope 永久失效问题）
@@ -117,6 +116,7 @@ class MainActivity : FlutterActivity() {
                                         it as? FoldingFeature
                                     }
                                     safeSend(
+                                        sink,
                                         f?.toMap() ?: mapOf(
                                             "posture" to "flat",
                                             "hingeOrientation" to "none",
@@ -125,7 +125,7 @@ class MainActivity : FlutterActivity() {
                                 }
                         } catch (_: Exception) {
                             // 某些 ROM（含鸿蒙）上 WindowManager API 可能异常，姿态退化为 unknown，不影响拦截功能
-                            safeSend(mapOf("posture" to "unknown", "hingeOrientation" to "none"))
+                            safeSend(sink, mapOf("posture" to "unknown", "hingeOrientation" to "none"))
                         }
                     }
                 }
