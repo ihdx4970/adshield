@@ -37,14 +37,6 @@ jobs:
           flutter --version
           xcodebuild -version
 
-      # 在云端生成 iOS 平台工程（本地仓库不含 ios/ 目录，保持源码精简）
-      - name: Generate iOS platform project
-        run: flutter create --project-name adshield --org com.adshield --platforms ios .
-
-      # 用带 DNS 过滤的自定义 AppDelegate 覆盖模板文件
-      - name: Apply custom AppDelegate (DNS filtering)
-        run: cp ios_native/AppDelegate.swift ios/Runner/AppDelegate.swift
-
       - name: Pub get
         run: flutter pub get
 

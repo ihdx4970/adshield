@@ -13,13 +13,24 @@
 - Android：`AdShield-v1.1.0.apk`（Release 构建，可直接安装）
 - iOS：`AdShield-ios-unsigned.ipa`（GitHub Actions 产出，**未签名**，需侧载）
 
-### iOS 安装说明（重要）
+### iOS 构建与安装说明（重要）
 
-iOS 无法像 APK 一样直接安装，未签名 IPA 的安装途径：
-1. **AltStore / Sideloadly**：连接电脑用个人 Apple ID 重签（免费证书 7 天有效期，可续签）；
-2. **TrollStore**（旧系统适用）：永久签名免越狱安装；
-3. 有付费开发者账号（$99/年）可用 Xcode 签名分发。
-需要完整签名分发时，把仓库中 `ios_native/DnsFilterPacketTunnelProvider.swift` 按 Xcode 步骤加入 Runner Target 并配置签名即可。
+iOS 无法像 APK 一样直接安装，且本账号的 GitHub 被 GitHub 风控限制了 macOS runner（ubuntu 正常、macOS 秒取消），云端构建暂不可用。仓库中已包含**完整的 iOS 工程（ios/ 目录）**，三条路径：
+
+1. **本地 Xcode 构建**（最直接）：任意装有 Xcode 15 的 Mac 上：
+   ```bash
+   flutter pub get && flutter build ios --release --no-codesign
+   # 打包未签名 IPA
+   mkdir Payload && cp -R build/ios/iphoneos/Runner.app Payload/ && zip -qry AdShield.ipa Payload
+   ```
+2. **有 macOS 权限的 GitHub 账号**：fork 本仓库后运行 `.github/workflows/ios.yml`（Actions 页面一键触发），产物自动上传到 Release；
+3. **Codemagic / Bitrise** 等第三方 CI（免费额度含 macOS 分钟数）。
+
+得到的**未签名 IPA** 安装途径：
+- **AltStore / Sideloadly**：连接电脑用个人 Apple ID 重签（免费证书 7 天有效期，可续签）；
+- **TrollStore**（旧系统适用）：永久签名免越狱安装；
+- 有付费开发者账号（$99/年）可用 Xcode 签名分发。
+需要隧道级过滤时，把 `ios_native/DnsFilterPacketTunnelProvider.swift` 按 Xcode 步骤加入 Runner Target 并配置 Network Extension 能力。
 
 ## 项目结构
 
