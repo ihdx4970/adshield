@@ -42,22 +42,14 @@ class FilterVpnService : VpnService() {
         private const val FAKE_DNS = "10.111.222.3"
         private const val FAKE_DNS6 = "fd00:53ad::1"
 
-        /// 常见硬编码 DNS IP，也一并路由进隧道拦截，防止应用绕过系统 DNS
-        private val INTERCEPTED_DNS = listOf(
-            FAKE_DNS, "8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1",
-            "9.9.9.9", "114.114.114.114", "223.5.5.5", "223.6.6.6",
-            "119.29.29.29", "180.76.76.76",
-        )
+        /// 假 DNS 地址的字节形式（用于快速比对，避免逐包调用 InetAddress）
+        private val FAKE_DNS_BYTES = InetAddress.getByName(FAKE_DNS).address
+        private val FAKE_DNS6_BYTES = InetAddress.getByName(FAKE_DNS6).address
 
-        /// 常见硬编码 IPv6 DNS（同样防止应用绕过）
-        private val INTERCEPTED_DNS6 = listOf(
-            FAKE_DNS6,
-            "2001:4860:4860::8888", "2001:4860:4860::8844", // Google
-            "2606:4700:4700::1111", "2606:4700:4700::1001", // Cloudflare
-            "2620:fe::fe", "2620:fe::9",                    // Quad9
-            "2400:3200::1", "2400:3200:baba::1",            // 阿里
-            "2402:4e00::",                                   // 腾讯 DNSPod
-        )
+        // 历史教训：曾把 8.8.8.8 / 114.114.114.114 / 223.5.5.5 等硬编码 DNS IP 整段
+        // 路由进隧道"防绕过"，导致发往这些 IP 的 DoH/DoT/TCP 流量被黑洞丢弃，
+        // 用加密 DNS 的应用全部超时重试、全机变慢。现已改为只路由假 DNS 地址，
+        // 应用自带加密 DNS 时让其直连（不过滤），优先保证系统整体网络体验。
 
         @JvmStatic
         val isRunning = AtomicBoolean(false)
@@ -194,16 +186,15 @@ class FilterVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("10.111.222.1", 32)
             .addDnsServer(FAKE_DNS)
-        // IPv6 栈：劫持硬编码 IPv6 DNS，防止应用绕过过滤
+        // IPv6 栈：系统 DNS 走假地址，全部经过滤引擎处理
         .addAddress(FAKE_DNS6, 64)
         .addDnsServer(FAKE_DNS6)
-        // 只把 DNS 流量路由进隧道，其余流量直连
-        for (ip in INTERCEPTED_DNS) {
-            builder.addRoute(ip, 32)
-        }
-        for (ip6 in INTERCEPTED_DNS6) {
-            builder.addRoute(ip6, 128)
-        }
+        // 只把假 DNS 地址路由进隧道（/32 精确匹配），其余全部流量直连。
+        // 注意：绝不路由 8.8.8.8 / 114 等硬编码 DNS IP——那会把发往这些 IP 的
+        // DoH(443)/DoT(853)/TCP 流量也吸进隧道并被丢弃，造成应用 DNS 黑洞、全机变慢。
+        // 应用自带加密 DNS 时让其直连（不过滤），优先保证系统整体网络体验。
+        builder.addRoute(FAKE_DNS, 32)
+        builder.addRoute(FAKE_DNS6, 128)
 
         try {
             tun = builder.establish() ?: run {
@@ -269,6 +260,13 @@ class FilterVpnService : VpnService() {
 
     private fun handlePacket(buffer: ByteArray, length: Int, output: FileOutputStream) {
         if (length < 40) return
+        val version = (buffer[0].toInt() shr 4) and 0xF
+        // 发往假 DNS 的 TCP（系统"私人 DNS"机会式 DoT 探测、TCP DNS 等）：
+        // 立即回 RST，客户端秒退回明文 UDP，避免黑洞等待超时拖慢系统
+        if (isTcpToFakeDns(buffer, length, version)) {
+            buildTcpRst(buffer, length, version)?.let { writePacket(output, it) }
+            return
+        }
         val exchange = parsePacket(buffer, length) ?: return
         val query = parseDnsQuery(exchange.dnsMsg) ?: return
         if (query.name.isEmpty()) return
@@ -298,6 +296,108 @@ class FilterVpnService : VpnService() {
                 }
             }
         }
+    }
+
+    /// 判断是否为发往假 DNS 地址的 TCP 包
+    private fun isTcpToFakeDns(buffer: ByteArray, length: Int, version: Int): Boolean {
+        val protoIdx: Int
+        val dstStart: Int
+        val addrLen: Int
+        when (version) {
+            4 -> { if (length < 24) return false; protoIdx = 9; dstStart = 16; addrLen = 4 }
+            6 -> { if (length < 44) return false; protoIdx = 6; dstStart = 24; addrLen = 16 }
+            else -> return false
+        }
+        if ((buffer[protoIdx].toInt() and 0xFF) != 6) return false // 仅 TCP
+        val dst = buffer.copyOfRange(dstStart, dstStart + addrLen)
+        return dst.contentEquals(FAKE_DNS_BYTES) || dst.contentEquals(FAKE_DNS6_BYTES)
+    }
+
+    /// 构造 TCP RST 应答（对 SYN 立即拒绝，让 DoT/TCP-DNS 客户端快速回退明文 UDP）
+    private fun buildTcpRst(buffer: ByteArray, length: Int, version: Int): ByteArray? {
+        val tcpStart: Int
+        val srcIp: ByteArray
+        val dstIp: ByteArray
+        when (version) {
+            4 -> {
+                val ihl = (buffer[0].toInt() and 0xF) * 4
+                if (ihl < 20 || length < ihl + 20) return null
+                tcpStart = ihl
+                srcIp = buffer.copyOfRange(12, 16)
+                dstIp = buffer.copyOfRange(16, 20)
+            }
+            6 -> {
+                if (length < 60) return null
+                tcpStart = 40
+                srcIp = buffer.copyOfRange(8, 24)
+                dstIp = buffer.copyOfRange(24, 40)
+            }
+            else -> return null
+        }
+        val flags = buffer[tcpStart + 13].toInt() and 0xFF
+        if (flags and 0x02 == 0) return null // 仅对 SYN 回 RST，其余忽略
+
+        val srcPort = ((buffer[tcpStart].toInt() and 0xFF) shl 8) or (buffer[tcpStart + 1].toInt() and 0xFF)
+        val dstPort = ((buffer[tcpStart + 2].toInt() and 0xFF) shl 8) or (buffer[tcpStart + 3].toInt() and 0xFF)
+        val seq = (((buffer[tcpStart + 4].toInt() and 0xFF) shl 24) or
+                ((buffer[tcpStart + 5].toInt() and 0xFF) shl 16) or
+                ((buffer[tcpStart + 6].toInt() and 0xFF) shl 8) or
+                (buffer[tcpStart + 7].toInt() and 0xFF)).toLong() and 0xFFFFFFFFL
+
+        val ipHdrLen = if (version == 4) 20 else 40
+        val out = ByteArray(ipHdrLen + 20)
+        val t = ipHdrLen
+
+        // TCP 头：RST+ACK，seq=0（SYN 无 ACK），ack=对端 seq+1
+        out[t] = (dstPort shr 8).toByte(); out[t + 1] = dstPort.toByte()
+        out[t + 2] = (srcPort shr 8).toByte(); out[t + 3] = srcPort.toByte()
+        out[t + 4] = 0; out[t + 5] = 0; out[t + 6] = 0; out[t + 7] = 0          // seq = 0
+        out[t + 8] = ((seq + 1) shr 24).toByte(); out[t + 9] = ((seq + 1) shr 16).toByte()
+        out[t + 10] = ((seq + 1) shr 8).toByte(); out[t + 11] = (seq + 1).toByte() // ack = seq+1
+        out[t + 12] = 0x50                                                       // 数据偏移 5×4=20
+        out[t + 13] = 0x14                                                       // RST|ACK
+        out[t + 14] = 0; out[t + 15] = 0                                         // window = 0
+        out[t + 16] = 0; out[t + 17] = 0                                         // 校验和后填
+        out[t + 18] = 0; out[t + 19] = 0                                         // urgent = 0
+
+        if (version == 4) {
+            val totalLen = ipHdrLen + 20
+            out[0] = 0x45; out[1] = 0
+            out[2] = (totalLen shr 8).toByte(); out[3] = totalLen.toByte()
+            out[4] = 0; out[5] = 0; out[6] = 0x40; out[7] = 0
+            out[8] = 64; out[9] = 6
+            srcIp.copyInto(out, 12); dstIp.copyInto(out, 16)
+            val ipCk = checksum(out, 0, 20)
+            out[10] = ((ipCk shr 8) and 0xFF).toByte(); out[11] = (ipCk and 0xFF).toByte()
+        } else {
+            out[0] = 0x60; out[1] = 0; out[2] = 0; out[3] = 0
+            out[4] = 0; out[5] = 20                       // payload len = 20
+            out[6] = 6                                    // next header TCP
+            out[7] = 64                                   // hop limit
+            srcIp.copyInto(out, 8); dstIp.copyInto(out, 24)
+        }
+
+        // TCP 校验和（伪首部）
+        val pseudo = ByteArray(20 + 40)
+        when (version) {
+            4 -> {
+                srcIp.copyInto(pseudo, 0); dstIp.copyInto(pseudo, 4)
+                pseudo[8] = 0; pseudo[9] = 6
+                pseudo[10] = 0; pseudo[11] = 20
+                out.copyInto(pseudo, 12, t, t + 20)
+            }
+            else -> {
+                srcIp.copyInto(pseudo, 0); dstIp.copyInto(pseudo, 16)
+                pseudo[32] = 0; pseudo[33] = 0; pseudo[34] = 0; pseudo[35] = 6
+                pseudo[36] = 0; pseudo[37] = 0; pseudo[38] = 0; pseudo[39] = 20
+                out.copyInto(pseudo, 40, t, t + 20)
+            }
+        }
+        var c = checksum(pseudo, 0, when (version) { 4 -> 32; else -> 60 })
+        if (c == 0) c = 0xFFFF
+        out[t + 16] = ((c shr 8) and 0xFF).toByte()
+        out[t + 17] = (c and 0xFF).toByte()
+        return out
     }
 
     /// 解析 IPv4/IPv6 + UDP/53 数据包；非 DNS 或带扩展头的 IPv6 返回 null
@@ -490,15 +590,20 @@ class FilterVpnService : VpnService() {
         return minTtl
     }
 
-    /// 写入缓存：TTL 收敛在 30 秒 ~ 10 分钟（过短无意义，过长避免 CDN 切换后拿到旧节点）
+    /// 写入缓存：TTL 收敛在 30 秒 ~ 10 分钟（过短无意义，过长避免 CDN 切换后拿到旧节点）；
+    /// NXDOMAIN（rcode 3）负缓存 60 秒，避免反复请求失效域名；SERVFAIL 等其它错误不缓存
     private fun storeInCache(key: String, reply: ByteArray) {
-        val ttl = parseMinTtl(reply) ?: return // 无应答记录（如 NXDOMAIN）不缓存
+        val expiresAt: Long = if (reply.size >= 4 && (reply[3].toInt() and 0xF) == 3) {
+            System.currentTimeMillis() + 60_000L
+        } else {
+            val ttl = parseMinTtl(reply) ?: return
+            System.currentTimeMillis() + ttl.coerceIn(30, 600) * 1000
+        }
         if (dnsCache.size >= 1024) {
             val now = System.currentTimeMillis()
             dnsCache.values.removeIf { it.expiresAt <= now }
             if (dnsCache.size >= 1024) dnsCache.clear()
         }
-        val expiresAt = System.currentTimeMillis() + ttl.coerceIn(30, 600) * 1000
         dnsCache[key] = CacheEntry(reply, expiresAt)
     }
 
