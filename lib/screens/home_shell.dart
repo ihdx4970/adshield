@@ -1,4 +1,5 @@
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 import "package:provider/provider.dart";
 
 import "../services/app_state.dart";
@@ -55,6 +56,48 @@ class _HomeShellState extends State<HomeShell> {
         _ => const SettingsScreen(),
       };
 
+  /// 诊断横幅：上次运行有异常时显示，可复制日志反馈。
+  Widget? _diagnosticBanner(AppState app) {
+    if (app.startupLog == null) return null;
+    return Material(
+      color: Theme.of(context).colorScheme.errorContainer,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.bug_report, size: 18),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  "检测到上次运行的异常日志，点此复制并反馈",
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+              TextButton(
+                onPressed: () async {
+                  final text = await app.diagnosticsText();
+                  await Clipboard.setData(ClipboardData(text: text));
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("诊断日志已复制到剪贴板")),
+                  );
+                  await app.clearDiagnostics();
+                },
+                child: const Text("复制"),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, size: 16),
+                onPressed: app.clearDiagnostics,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
@@ -64,16 +107,23 @@ class _HomeShellState extends State<HomeShell> {
 
     if (wide && !halfOpen) {
       return Scaffold(
-        body: Row(
+        body: Column(
           children: [
-            NavigationRail(
-              selectedIndex: _index,
-              onDestinationSelected: (i) => setState(() => _index = i),
-              labelType: NavigationRailLabelType.all,
-              destinations: _destinations,
+            if (_diagnosticBanner(app) != null) _diagnosticBanner(app)!,
+            Expanded(
+              child: Row(
+                children: [
+                  NavigationRail(
+                    selectedIndex: _index,
+                    onDestinationSelected: (i) => setState(() => _index = i),
+                    labelType: NavigationRailLabelType.all,
+                    destinations: _destinations,
+                  ),
+                  const VerticalDivider(width: 1),
+                  Expanded(child: _page()),
+                ],
+              ),
             ),
-            const VerticalDivider(width: 1),
-            Expanded(child: _page()),
           ],
         ),
       );
@@ -97,6 +147,7 @@ class _HomeShellState extends State<HomeShell> {
         ),
         body: Column(
           children: [
+            if (_diagnosticBanner(app) != null) _diagnosticBanner(app)!,
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Wrap(
@@ -120,7 +171,12 @@ class _HomeShellState extends State<HomeShell> {
 
     // 常规窄屏：底部导航
     return Scaffold(
-      body: _page(),
+      body: Column(
+        children: [
+          if (_diagnosticBanner(app) != null) _diagnosticBanner(app)!,
+          Expanded(child: _page()),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),

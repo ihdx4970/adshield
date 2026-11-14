@@ -38,7 +38,8 @@ class MainActivity : FlutterActivity() {
 
         // ---------- MethodChannel ----------
         MethodChannel(messenger, "adshield/native").setMethodCallHandler { call, result ->
-            when (call.method) {
+            try {
+                when (call.method) {
                 "startEngine" -> requestVpnPermission { granted ->
                     if (granted) {
                         FilterVpnService.isRunning.set(false)
@@ -75,35 +76,64 @@ class MainActivity : FlutterActivity() {
                     result.success(FilterVpnService.instance != null || !FilterVpnService.isRunning.get())
                 }
                 else -> result.notImplemented()
+                }
+            } catch (e: Exception) {
+                AdShieldApplication.appendLog(this, "[MethodChannel ${call.method}]\n${e.stackTraceToString()}")
+                if (e.message?.contains("already") == true) return
+                result.error("NATIVE_ERROR", e.message, null)
             }
         }
 
         // ---------- EventChannel：折叠姿态 ----------
         EventChannel(messenger, "adshield/fold").setStreamHandler(
             object : EventChannel.StreamHandler {
+                private var foldJob: kotlinx.coroutines.Job? = null
+                private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+                /// 保证 sink 只在主线程调用，且吞掉发送异常（对端销毁时 Flutter 层会抛错）
+                private fun safeSend(data: Any?) {
+                    mainHandler.post {
+                        try {
+                            sink?.success(data)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+
                 @OptIn(ExperimentalWindowApi::class)
                 override fun onListen(args: Any?, sink: EventChannel.EventSink?) {
                     foldSink = sink
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                        sink?.success(mapOf("posture" to "unknown", "hingeOrientation" to "none"))
+                        safeSend(mapOf("posture" to "unknown", "hingeOrientation" to "none"))
                         return
                     }
-                    scope.launch(Dispatchers.Main) {
-                        WindowInfoTracker.getOrCreate(this@MainActivity)
-                            .windowLayoutInfo(this@MainActivity)
-                            .collectLatest { info ->
-                                val f = info.displayFeatures.firstNotNullOfOrNull {
-                                    it as? FoldingFeature
+                    // 每次监听用独立 Job，取消后仍可重新监听（修复旧版 scope 永久失效问题）
+                    foldJob = scope.launch(Dispatchers.Main) {
+                        try {
+                            WindowInfoTracker.getOrCreate(this@MainActivity)
+                                .windowLayoutInfo(this@MainActivity)
+                                .collectLatest { info ->
+                                    val f = info.displayFeatures.firstNotNullOfOrNull {
+                                        it as? FoldingFeature
+                                    }
+                                    safeSend(
+                                        f?.toMap() ?: mapOf(
+                                            "posture" to "flat",
+                                            "hingeOrientation" to "none",
+                                        )
+                                    )
                                 }
-                                sink?.success(f?.toMap() ?: mapOf(
-                                    "posture" to "flat", "hingeOrientation" to "none"))
-                            }
+                        } catch (_: Exception) {
+                            // 某些 ROM（含鸿蒙）上 WindowManager API 可能异常，姿态退化为 unknown，不影响拦截功能
+                            safeSend(mapOf("posture" to "unknown", "hingeOrientation" to "none"))
+                        }
                     }
                 }
 
                 override fun onCancel(args: Any?) {
+                    foldJob?.cancel()
+                    foldJob = null
                     foldSink = null
-                    scope.cancel()
                 }
             }
         )

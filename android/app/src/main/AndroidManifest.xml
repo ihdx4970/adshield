@@ -12,8 +12,9 @@
 
     <application
         android:label="AdShield"
-        android:name="${applicationName}"
+        android:name="com.adshield.app.AdShieldApplication"
         android:icon="@mipmap/ic_launcher"
+        android:extractNativeLibs="true"
         android:enableOnBackInvokedCallback="true">
 
         <activity

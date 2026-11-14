@@ -3,6 +3,7 @@ import "dart:async";
 import "package:flutter/foundation.dart";
 
 import "../models/models.dart";
+import "diagnostics.dart";
 import "native_bridge.dart";
 import "rule_service.dart";
 import "stats_service.dart";
@@ -17,6 +18,8 @@ class AppState extends ChangeNotifier {
   RuleService? ruleService;
   StatsService? statsService;
   String? lastMessage;
+  /// 上次运行遗留的诊断日志（如有异常，首页横幅展示，方便用户反馈）。
+  String? startupLog;
 
   StreamSubscription<FoldState>? _foldSub;
   bool _initializing = false;
@@ -25,6 +28,12 @@ class AppState extends ChangeNotifier {
     if (_initializing) return;
     _initializing = true;
     try {
+      final log = await Diagnostics.readTail();
+      if (log.contains("CRASH") ||
+          log.contains("FlutterError") ||
+          log.contains("Uncaught")) {
+        startupLog = log;
+      }
       ruleService = await RuleService.load();
       statsService = await StatsService.load();
       await ruleService!.syncToNative();
@@ -38,9 +47,25 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       });
       notifyListeners();
+    } catch (e, s) {
+      await Diagnostics.log("init error: $e\n$s");
+      lastMessage = "初始化部分失败：$e";
+      notifyListeners();
     } finally {
       _initializing = false;
     }
+  }
+
+  /// 复制诊断日志到剪贴板（用户反馈崩溃问题用）。
+  Future<String> diagnosticsText() async {
+    final nativeHint = "（另外可在文件管理器 Android/data/com.adshield.app/files/crash_log.txt 找到原生崩溃日志）";
+    return (await Diagnostics.readTail()) + "\n$nativeHint";
+  }
+
+  Future<void> clearDiagnostics() async {
+    await Diagnostics.clear();
+    startupLog = null;
+    notifyListeners();
   }
 
   void _onStats(Stats s) {

@@ -1,12 +1,20 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 import "package:provider/provider.dart";
 
 import "services/app_state.dart";
+import "services/diagnostics.dart";
 import "screens/home_shell.dart";
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const AdShieldApp());
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    Diagnostics.installHooks();
+    runApp(const AdShieldApp());
+  }, (e, stack) {
+    Diagnostics.log("Uncaught: $e\n$stack");
+  });
 }
 
 class AdShieldApp extends StatelessWidget {
